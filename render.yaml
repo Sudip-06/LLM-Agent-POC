@@ -4,27 +4,23 @@ services:
     env: node
     plan: free
     region: oregon
-    runtime: node
-    buildCommand: ""
-    startCommand: "node server.js"
-    autoDeploy: true
+    buildCommand: "npm ci"
+    startCommand: "npm start"
     envVars:
       - key: NODE_VERSION
-        value: 22
-      - key: PORT
-        value: 10000
-      # --- Providers ---
-      - key: GROQ_API_KEY
-        sync: false
-      - key: GEMINI_API_KEY
-        sync: false
-      # --- Google Search (CSE) ---
-      - key: GOOGLE_API_KEY
-        sync: false
-      - key: GOOGLE_CSE_ID
-        sync: false
-      # --- AI Pipe proxy (optional but recommended) ---
-      - key: AIPIPE_URL
-        sync: false
-      - key: AIPIPE_AUTH
-        sync: false
+        value: 20
+      - key: NODE_ENV
+        value: production
+      # Add your secrets in Render Dashboard or here (not recommended to commit secrets)
+      # - key: GROQ_API_KEY
+      #   sync: false
+      # - key: GEMINI_API_KEY
+      #   sync: false
+      # - key: GOOGLE_API_KEY
+      #   sync: false
+      # - key: GOOGLE_CSE_ID
+      #   sync: false
+      # - key: AIPIPE_URL
+      #   sync: false
+      # - key: AIPIPE_AUTH
+      #   sync: false
