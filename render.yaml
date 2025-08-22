@@ -25,5 +25,7 @@ services:
         sync: false
       - key: AIPIPE_URL
         sync: false
+      - key: AIPIPE_AUTH
+        sync: false
     healthCheckPath: /api/healthz
     autoDeploy: true
