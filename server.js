@@ -1,306 +1,267 @@
-
 import express from "express";
 import cors from "cors";
 import morgan from "morgan";
-import fetch from "node-fetch";
-import path from "node:path";
-import { fileURLToPath } from "url";
-import dotenv from "dotenv";
-dotenv.config();
+import { createHash, randomUUID } from "node:crypto";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
+// ------------ Basic app ------------
 const app = express();
+const PORT = process.env.PORT || 10000;
+
 app.use(cors());
-app.use(express.json({ limit: "4mb" }));
+app.use(express.json({ limit: "1mb" }));
 app.use(morgan("tiny"));
 
-/* =========================
-   Environment
-========================= */
-const {
-  PORT = 7860,
+// Serve static (index.html + assets) from project root
+app.use(express.static("."));
 
-  // Groq (OpenAI-compatible)
-  GROQ_API_KEY = "",
-  DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b",
+// ------------ Health ------------
+app.get("/api/healthz", (req, res) => {
+  res.json({
+    ok: true,
+    uptime: process.uptime(),
+    now: new Date().toISOString(),
+    routes: ["/api/groq/chat", "/api/gemini/chat", "/api/search", "/api/aipipe", "/api/aipipe/debug"]
+  });
+});
 
-  // Gemini (Google Generative Language API)
-  GEMINI_API_KEY = "",
-  DEFAULT_GEMINI_MODEL = "gemini-2.5-flash",
-
-  // Google Programmable Search for /api/search
-  GOOGLE_API_KEY = "",
-  GOOGLE_CSE_ID = "",
-
-  // AI Pipe proxy
-  AIPIPE_URL = "",
-  AIPIPE_AUTH = ""   // NEW: optional Authorization header (e.g., "Bearer <token>")
-} = process.env;
-
-if (!GROQ_API_KEY) console.warn("WARNING: GROQ_API_KEY not set.");
-if (!GEMINI_API_KEY) console.warn("WARNING: GEMINI_API_KEY not set.");
-
-app.get("/api/healthz", (_req, res) =>
-  res.json({ ok: true, service: "llm-agent-dual" })
-);
-app.get("/api/version", (_req, res) => res.json({ version: "1.0.2" }));
-
-/* =========================
-   Groq chat (OpenAI-style)
-   POST /api/groq/chat
-========================= */
-app.post("/api/groq/chat", async (req, res) => {
+// ------------ Google CSE search ------------
+app.get("/api/search", async (req, res) => {
   try {
-    if (!GROQ_API_KEY) return res.status(500).json({ error: "Missing GROQ_API_KEY" });
+    const q = (req.query.q || "").toString();
+    const key = (process.env.GOOGLE_CSE_KEY || "").trim();
+    const cx  = (process.env.GOOGLE_CSE_ID  || "").trim();
 
-    const body = req.body || {};
-    const model = body.model || DEFAULT_GROQ_MODEL;
-    if (!Array.isArray(body.messages)) body.messages = [];
+    if (!q) return res.status(400).json({ ok: false, error: "Missing query ?q=" });
+    if (!key || !cx) {
+      return res.json({
+        ok: false,
+        error: "GOOGLE_CSE_KEY or GOOGLE_CSE_ID not set",
+        items: []
+      });
+    }
 
-    const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${GROQ_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        ...body,
-        model,
-        tool_choice: "auto",
-        temperature: body.temperature ?? 0.3
-      })
-    });
+    const url = new URL("https://www.googleapis.com/customsearch/v1");
+    url.searchParams.set("key", key);
+    url.searchParams.set("cx", cx);
+    url.searchParams.set("q", q);
 
+    const r = await fetch(url, { method: "GET" });
     const data = await r.json();
-    if (!r.ok) return res.status(r.status).json(data);
-    res.json(data);
-  } catch (err) {
-    console.error("Groq error:", err);
-    res.status(500).json({ error: { message: err.message || "Groq chat proxy failed" } });
+    res.json({
+      ok: true,
+      items: (data.items || []).map(it => ({
+        title: it.title,
+        link: it.link,
+        snippet: it.snippet
+      }))
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
 
-/* =========================
-   Gemini adapter (v1beta)
-   POST /api/gemini/chat
-========================= */
+// ------------ AI Pipe proxy ------------
+function pickAIPipeAuth(req) {
+  const clientOverride = req.headers["x-aipipe-auth"];
+  if (clientOverride && String(clientOverride).trim()) {
+    return { token: String(clientOverride).trim(), mode: "client-x-aipipe-auth" };
+  }
+  const envToken = (process.env.AIPIPE_AUTH || "").trim();
+  if (envToken) return { token: envToken, mode: "env" };
+  return { token: "", mode: "none" };
+}
+
+app.get("/api/aipipe/debug", (req, res) => {
+  const t = (process.env.AIPIPE_AUTH || "").trim();
+  res.json({
+    url_set: !!process.env.AIPIPE_URL,
+    has_token: !!t,
+    bearer: /^Bearer\s+/i.test(t),
+    len: t.length,
+    hash: t ? createHash("sha256").update(t).digest("hex").slice(0, 12) : ""
+  });
+});
+
+app.post("/api/aipipe", async (req, res) => {
+  try {
+    const url = (process.env.AIPIPE_URL || "").trim();
+    const { token, mode } = pickAIPipeAuth(req);
+
+    res.set("x-aipipe-mode", "proxy");
+    res.set("x-aipipe-auth-mode", mode);
+    res.set("x-aipipe-auth-bearer", String(token.startsWith("Bearer ")));
+    res.set("x-aipipe-auth-len", String(token.length));
+    if (token) {
+      res.set("x-aipipe-auth-hash", createHash("sha256").update(token).digest("hex").slice(0, 12));
+    }
+
+    if (!url) return res.status(500).json({ ok: false, error: "AIPIPE_URL not configured" });
+    if (!token) return res.status(401).json({ ok: false, error: "Unauthorized" });
+
+    const r = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": token
+      },
+      body: JSON.stringify(req.body || {})
+    });
+
+    // Bubble up upstream status/content
+    res.status(r.status);
+    res.set("cache-control", r.headers.get("cache-control") || "no-store");
+    res.json(await r.json());
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+// ------------ Groq chat (OpenAI-compatible) ------------
+app.post("/api/groq/chat", async (req, res) => {
+  try {
+    const apiKey = (process.env.GROQ_API_KEY || "").trim();
+    if (!apiKey) return res.status(500).json({ error: "GROQ_API_KEY not set" });
+
+    const url = "https://api.groq.com/openai/v1/chat/completions";
+    // Pass through OpenAI-like payload from frontend
+    const payload = {
+      model: req.body.model,
+      messages: req.body.messages,
+      temperature: req.body.temperature ?? 0.3,
+      tools: req.body.tools,
+      tool_choice: req.body.tool_choice
+    };
+
+    const r = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(payload)
+    });
+
+    const data = await r.json();
+    if (!r.ok) {
+      return res.status(r.status).json({ error: data.error || data });
+    }
+    res.json(data);
+  } catch (e) {
+    res.status(500).json({ error: String(e?.message || e) });
+  }
+});
+
+// ------------ Gemini chat (Generative Language API) ------------
+/**
+ * Convert OpenAI-style messages => Gemini contents
+ * role: user/assistant -> Gemini roles "user"/"model"
+ */
+function toGeminiContents(messages = []) {
+  return messages.map(m => {
+    const role = m.role === "assistant" ? "model" : "user";
+    return {
+      role,
+      parts: [{ text: String(m.content || "") }]
+    };
+  });
+}
+
+/**
+ * Convert OpenAI tool schema -> Gemini functionDeclarations
+ */
+function toGeminiFunctionDeclarations(tools = []) {
+  const decls = [];
+  for (const t of tools || []) {
+    if (t?.type !== "function" || !t.function) continue;
+    const f = t.function;
+    decls.push({
+      name: f.name,
+      description: f.description || "",
+      // Gemini expects JSON schema expressed similarly; pass-through is okay
+      parameters: f.parameters || {}
+    });
+  }
+  return decls;
+}
+
+/**
+ * Convert Gemini candidates -> OpenAI-ish {choices:[{message:{content, tool_calls}}]}
+ */
+function fromGeminiToOpenAIShape(gemini) {
+  const choice = { message: { role: "assistant", content: "", tool_calls: [] } };
+
+  const cand = gemini?.candidates?.[0];
+  const parts = cand?.content?.parts || [];
+  for (const p of parts) {
+    if (p?.text) {
+      choice.message.content += (choice.message.content ? "\n" : "") + p.text;
+    }
+    if (p?.functionCall) {
+      const id = randomUUID();
+      const name = p.functionCall.name;
+      const args = JSON.stringify(p.functionCall.args || {});
+      choice.message.tool_calls.push({
+        id,
+        type: "function",
+        function: { name, arguments: args }
+      });
+    }
+  }
+  // If nothing at all, ensure content is at least empty string
+  return { choices: [choice] };
+}
+
 app.post("/api/gemini/chat", async (req, res) => {
   try {
-    if (!GEMINI_API_KEY) return res.status(500).json({ error: "Missing GEMINI_API_KEY" });
+    const apiKey = (process.env.GEMINI_API_KEY || "").trim();
+    if (!apiKey) return res.status(500).json({ error: "GEMINI_API_KEY not set" });
 
-    const { model, system, messages, tools } = req.body || {};
-    const mdl = model || DEFAULT_GEMINI_MODEL;
-    if (!Array.isArray(messages)) return res.status(400).json({ error: "messages[] required" });
+    const model = req.body.model || "gemini-2.5-flash";
+    const systemText = (req.body.system || "").trim();
+    const messages = req.body.messages || [];
+    const tools = req.body.tools || [];
 
-    // OpenAI tools -> Gemini functionDeclarations
-    let functionDeclarations;
-    if (Array.isArray(tools) && tools.length) {
-      functionDeclarations = tools
-        .filter(t => t?.type === "function" && t.function?.name)
-        .map(t => ({
-          name: t.function.name,
-          description: t.function.description || "",
-          parameters: t.function.parameters || { type: "object" } // JSON schema
-        }));
-    }
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${apiKey}`;
 
-    // OpenAI messages -> Gemini contents
-    const contents = [];
-    let systemInstruction = system
-      ? { role: "system", parts: [{ text: String(system) }] }
-      : undefined;
+    const functionDeclarations = toGeminiFunctionDeclarations(tools);
+    const hasTools = functionDeclarations.length > 0;
 
-    for (const m of messages) {
-      const role = m.role;
-      if (role === "system") {
-        systemInstruction = { role: "system", parts: [{ text: String(m.content || "") }] };
-        continue;
-      }
-      if (role === "tool") {
-        // Tool result => functionResponse
-        let responseObj = {};
-        try { responseObj = m.content ? JSON.parse(m.content) : {}; }
-        catch { responseObj = { raw: String(m.content || "") }; }
-        contents.push({
-          role: "tool",
-          parts: [{ functionResponse: { name: m.name || m.tool_name || "tool", response: responseObj } }]
-        });
-        continue;
-      }
-      // user / assistant
-      const gemRole = role === "assistant" ? "model" : (role === "user" ? "user" : role);
-      contents.push({ role: gemRole, parts: [{ text: String(m.content || "") }] });
-    }
-
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(mdl)}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
-    const body = {
-      contents,
-      tools: functionDeclarations && functionDeclarations.length ? [{ functionDeclarations }] : undefined,
-      systemInstruction
+    const payload = {
+      contents: toGeminiContents(messages),
+      generationConfig: {
+        temperature: req.body.temperature ?? 0.3
+      },
+      ...(systemText ? { systemInstruction: { role: "system", parts: [{ text: systemText }] } } : {}),
+      ...(hasTools ? { tools: [{ functionDeclarations }] } : {}),
+      ...(hasTools ? { toolConfig: { functionCallBehavior: { mode: "ANY" } } } : {})
     };
 
     const r = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
+      body: JSON.stringify(payload)
     });
+
     const data = await r.json();
-    if (!r.ok) return res.status(r.status).json(data);
-
-    // Normalize Gemini -> OpenAI-like
-    const cand = (data.candidates || [])[0] || {};
-    const parts = cand.content?.parts || [];
-    const contentText = parts.filter(p => p.text).map(p => p.text).join("\n");
-
-    const tool_calls = [];
-    let callIdx = 0;
-    for (const p of parts) {
-      if (p.functionCall?.name) {
-        const name = p.functionCall.name;
-        const args = p.functionCall.args || p.functionCall.arguments || {};
-        tool_calls.push({
-          id: `call_${Date.now()}_${callIdx++}`,
-          type: "function",
-          function: { name, arguments: JSON.stringify(args) }
-        });
-      }
+    if (!r.ok) {
+      return res.status(r.status).json({ error: data.error || data });
     }
 
-    res.json({ choices: [{ message: { content: contentText || "", tool_calls } }] });
-  } catch (err) {
-    console.error("Gemini error:", err);
-    res.status(500).json({ error: { message: err.message || "Gemini adapter failed" } });
+    // Map Gemini -> OpenAI shape for the frontend
+    const mapped = fromGeminiToOpenAIShape(data);
+    res.json(mapped);
+  } catch (e) {
+    res.status(500).json({ error: String(e?.message || e) });
   }
 });
 
-/* =========================
-   Google Search (Custom Search)
-========================= */
-app.get("/api/search", async (req, res) => {
-  try {
-    const q = (req.query.q || "").toString().trim();
-    if (!q) return res.status(400).json({ error: "Missing q" });
-    if (!GOOGLE_API_KEY || !GOOGLE_CSE_ID) {
-      return res.status(500).json({ error: "GOOGLE_API_KEY/GOOGLE_CSE_ID not set" });
-    }
-
-    const url = new URL("https://www.googleapis.com/customsearch/v1");
-    url.searchParams.set("key", GOOGLE_API_KEY);
-    url.searchParams.set("cx", GOOGLE_CSE_ID);
-    url.searchParams.set("q", q);
-
-    const r = await fetch(url);
-    const d = await r.json();
-    if (!r.ok) return res.status(r.status).json(d);
-
-    const items = (d.items || []).map(it => ({
-      title: it.title,
-      link: it.link,
-      snippet: it.snippet
-    }));
-    res.json({ query: q, items });
-  } catch (err) {
-    console.error("Search error:", err);
-    res.status(500).json({ error: { message: err.message || "Search failed" } });
-  }
+// ------------ Fallback to index.html (single-page app) ------------
+app.get("*", (req, res, next) => {
+  if (req.path.startsWith("/api/")) return next();
+  res.sendFile(process.cwd() + "/index.html");
 });
 
-/* =========================
-   AI Pipe (proxy or mock)
-========================= */
-// at top with other imports
-import crypto from "node:crypto";
-
-// ...
-
-app.post("/api/aipipe", async (req, res) => {
-  try {
-    if (!process.env.AIPIPE_URL) {
-      // ---- Mock branch (no URL set) ----
-      const { input = "" } = req.body || {};
-      res.set("x-aipipe-mode", "mock");
-      return res.json({
-        ok: true,
-        engine: "mock",
-        received_input: input,
-        steps: [
-          { name: "parse", status: "ok" },
-          { name: "analyze", status: "ok" },
-          { name: "summarize", status: "ok" }
-        ],
-        summary: input ? `AI Pipe mock processed: "${input}"` : "AI Pipe mock: no input provided.",
-        timestamp: new Date().toISOString()
-      });
-    }
-
-    // ---- Proxy branch ----
-    const headers = { "Content-Type": "application/json" };
-
-    // Helper: sanitize tokens (trim, dequote, ensure Bearer)
-    const dequote = s => s.replace(/^"(.*)"$/, "$1").replace(/^'(.*)'$/, "$1");
-    const normalizeToken = raw => {
-      let t = (raw || "").toString().trim();
-      t = dequote(t);
-      if (!t) return "";
-      // If user pasted a bare JWT, prefix Bearer
-      if (!/^Bearer\s+/i.test(t)) t = "Bearer " + t;
-      return t;
-    };
-
-    // Prefer client override for testing, else env
-    let authMode = "none";
-    let token =
-      normalizeToken(req.get("x-aipipe-auth")) ||
-      normalizeToken(req.get("authorization")) ||
-      normalizeToken(process.env.AIPIPE_AUTH);
-
-    if (token) {
-      if (normalizeToken(req.get("x-aipipe-auth"))) authMode = "client-x-aipipe-auth";
-      else if (normalizeToken(req.get("authorization"))) authMode = "client-authorization";
-      else authMode = "env";
-      headers["Authorization"] = token;
-    }
-
-    // Call downstream AI Pipe
-    const r = await fetch(process.env.AIPIPE_URL, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(req.body || {})
-    });
-
-    const text = await r.text();
-    let payload; try { payload = JSON.parse(text); } catch { payload = { raw: text }; }
-
-    // Safe debug headers (no secrets)
-    const len = (token || "").length;
-    const isBearer = (token || "").startsWith("Bearer ");
-    const hash = len ? crypto.createHash("sha256").update(token).digest("hex").slice(0, 12) : "";
-
-    res.set("x-aipipe-mode", "proxy");
-    res.set("x-aipipe-auth-mode", authMode);
-    res.set("x-aipipe-auth-len", String(len));
-    res.set("x-aipipe-auth-bearer", String(isBearer));
-    res.set("x-aipipe-auth-hash", hash);
-
-    return res.status(r.status).json(payload);
-  } catch (err) {
-    console.error("AI Pipe error:", err);
-    res.status(500).json({ ok:false, error: err.message || "AI Pipe failed" });
-  }
-});
-
-
-
-/* =========================
-   Static frontend
-========================= */
-app.use(express.static(path.join(__dirname, "public")));
-app.get("*", (_req, res) => {
-  res.sendFile(path.join(__dirname, "public", "index.html"));
-});
-
+// ------------ Start ------------
 app.listen(PORT, () => {
-  console.log(`LLM Agent (Groq + Gemini) running on http://localhost:${PORT}`);
+  console.log(`LLM Agent server running on http://localhost:${PORT}`);
 });
