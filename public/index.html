@@ -4,11 +4,14 @@
   <meta charset="utf-8">
   <title>LLM Agent POC — Groq & Gemini</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
+
   <!-- Bootstrap -->
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <script defer src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-  <!-- Optional helper -->
+
+  <!-- Optional helper (keeps our defaults if not available) -->
   <script defer src="https://cdn.jsdelivr.net/gh/sanand0/bootstrap-llm-provider/dist/bootstrap-llm-provider.min.js"></script>
+
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <style>
     body { background:#fff; }
@@ -45,8 +48,8 @@
         <select id="modelMain" class="form-select"></select>
       </div>
       <div class="col-md-4">
-        <div class="label">Custom prompt</div>
-        <input id="systemPrompt" class="form-control" value="">
+        <div class="label">System prompt</div>
+        <input id="systemPrompt" class="form-control" placeholder="Optional: set behavior/instructions for the agent">
       </div>
     </div>
 
@@ -150,9 +153,6 @@ function populateModels() {
   fill(modelAnswer);
 }
 providerSel.addEventListener("change", populateModels);
-
-// Ensure Gemini is default on load (belt + suspenders)
-providerSel.value = "gemini";
 populateModels();
 
 /* =========================
@@ -210,26 +210,40 @@ function renderAIPipeCard(d) {
 }
 
 /* =========================
-   Web Worker sandbox (exec_js)
+   Web Worker sandbox (exec_js) — hardened
 ========================= */
-function runInWorker(code) {
+function runInWorker(code, ms = 5000) {
   return new Promise((resolve) => {
     const blob = new Blob([`
+      const logs=[];
+      const _log=(...a)=>{try{logs.push(a.map(x=>{try{return typeof x==='string'?x:JSON.stringify(x)}catch{return String(x)}}).join(' '));}catch(e){logs.push('[log error] '+(e?.message||e))}}
+      console.log=_log; console.warn=_log; console.error=_log; console.info=_log;
+
       self.onmessage = (e) => {
+        const done=(ok, payload)=>self.postMessage({ ok, ...payload, logs });
         try {
-          const result = (async () => { ${e.data} })();
-          Promise.resolve(result).then(
-            v => self.postMessage({ ok:true, result:String(v) }),
-            e => self.postMessage({ ok:false, error:String(e?.message||e) })
+          const run = new Function(\`"use strict"; return (async () => { \${e.data} })()\`);
+          Promise.resolve(run()).then(
+            v => {
+              let out;
+              try { out = (typeof v === "string") ? v : JSON.stringify(v); } catch { out = String(v); }
+              done(true, { result: out });
+            },
+            err => done(false, { error: String(err?.message||err) })
           );
         } catch (err) {
-          self.postMessage({ ok:false, error:String(err?.message||err) });
+          done(false, { error: String(err?.message||err) });
         }
       };`], { type: "application/javascript" });
     const worker = new Worker(URL.createObjectURL(blob));
-    worker.onmessage = (e) => {
-      resolve(e.data.ok ? e.data.result : "Error: "+e.data.error);
+    const timer = setTimeout(() => {
       worker.terminate();
+      resolve({ ok:false, timeout:true, error:"Timed out", result:"", logs:[] });
+    }, ms);
+    worker.onmessage = (e) => {
+      clearTimeout(timer);
+      worker.terminate();
+      resolve(e.data);
     };
     worker.postMessage(code);
   });
@@ -238,10 +252,23 @@ function runInWorker(code) {
 /* =========================
    Tools (frontend; /api/* on server)
 ========================= */
+async function fetchWithRetry(url, opts = {}, retries = 1) {
+  try {
+    const r = await fetch(url, opts);
+    if (!r.ok) throw new Error(`${opts.method || "GET"} ${url} -> ${r.status}`);
+    return r;
+  } catch (e) {
+    if (retries > 0) {
+      await new Promise(r => setTimeout(r, 300));
+      return fetchWithRetry(url, opts, retries - 1);
+    }
+    throw e;
+  }
+}
+
 async function tool_search(params) {
   const q = params?.q || "";
-  const r = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
-  if (!r.ok) throw new Error(`search failed (${r.status})`);
+  const r = await fetchWithRetry(`/api/search?q=${encodeURIComponent(q)}`, {}, 1);
   const d = await r.json();
   const html = (d.items||[]).slice(0,5).map(it =>
     `<div class="mb-2"><a href="${it.link}" target="_blank">${escapeHtml(it.title)}</a><div class="text-muted small">${escapeHtml(it.snippet||"")}</div></div>`
@@ -250,19 +277,27 @@ async function tool_search(params) {
   return d;
 }
 async function tool_aipipe(params) {
-  const r = await fetch("/api/aipipe", {
-    method:"POST", headers:{ "Content-Type":"application/json" },
+  const r = await fetchWithRetry("/api/aipipe", {
+    method:"POST",
+    headers:{ "Content-Type":"application/json" },
     body: JSON.stringify(params || {})
-  });
-  if (!r.ok) throw new Error(`aipipe failed (${r.status})`);
+  }, 1);
   const d = await r.json();
+  if (d?.ok !== true) throw new Error(d?.error || "aipipe error");
   addToolHtml("aipipe()", renderAIPipeCard(d));
   return d;
 }
 async function tool_exec_js(params) {
-  const out = await runInWorker(params?.code || "");
-  addToolHtml("exec_js()", `<pre class="mb-0">${escapeHtml(out)}</pre>`);
-  return { output: out };
+  const code = params?.code || "";
+  if (code.length > 8000) throw new Error("Code too large (>8k)");
+  const out = await runInWorker(code, 5000);
+  const main = out.ok ? out.result : `Error: ${out.error||"unknown"}`;
+  const pre = `<pre class="mb-0">${escapeHtml(main)}</pre>`;
+  const logs = (out.logs && out.logs.length)
+    ? `<div class="small text-muted mt-1"><strong>console:</strong><br><pre class="mb-0">${escapeHtml(out.logs.join("\n"))}</pre></div>`
+    : "";
+  addToolHtml("exec_js()", pre + logs);
+  return { output: out.result, logs: out.logs || [], timeout: !!out.timeout };
 }
 const TOOL_MAP = { search: tool_search, aipipe: tool_aipipe, exec_js: tool_exec_js };
 
@@ -312,7 +347,7 @@ async function callLLM(provider, model, messages, withTools=true) {
   });
   if (!r.ok) {
     const t = await r.text();
-    throw new Error(`${provider} chat error ${r.status}: ${t}`);
+    throw new Error(`${provider} chat error ${r.status}: ${t.slice(0,200)}`);
   }
   return r.json();
 }
@@ -402,7 +437,12 @@ sendBtn.addEventListener("click", () => {
 });
 userInput.addEventListener("keydown", (e) => { if (e.key === "Enter") sendBtn.click(); });
 
-/* Optional helper population */
+// Show unhandled errors as alerts
+window.addEventListener("unhandledrejection", (e) => {
+  showAlert(`Unhandled error: ${escapeHtml(e.reason?.message || String(e.reason))}`, "danger", 8000);
+});
+
+/* Optional: helper population (keeps our defaults if not available) */
 (async () => {
   try {
     await bootstrapLLMProvider.populate(modelMain);
