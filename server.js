@@ -209,11 +209,30 @@ app.get("/api/search", async (req, res) => {
 /* =========================
    AI Pipe (proxy or mock)
 ========================= */
+// server.js
 app.post("/api/aipipe", async (req, res) => {
   try {
     if (AIPIPE_URL) {
+      // Build headers
       const headers = { "Content-Type": "application/json" };
-      if (AIPIPE_AUTH) headers["Authorization"] = AIPIPE_AUTH;
+
+      // 1) Preferred: from env (production)
+      let authMode = "none";
+      if (AIPIPE_AUTH && AIPIPE_AUTH.trim()) {
+        headers["Authorization"] = AIPIPE_AUTH.trim();
+        authMode = "env";
+      } else {
+        // 2) Fallbacks for dev/debug
+        const hClientAuth = req.get("authorization");
+        const hClientX    = req.get("x-aipipe-auth");
+        if (hClientAuth && hClientAuth.trim()) {
+          headers["Authorization"] = hClientAuth.trim();
+          authMode = "client-authorization";
+        } else if (hClientX && hClientX.trim()) {
+          headers["Authorization"] = hClientX.trim();
+          authMode = "client-x-aipipe-auth";
+        }
+      }
 
       const r = await fetch(AIPIPE_URL, {
         method: "POST",
@@ -221,16 +240,20 @@ app.post("/api/aipipe", async (req, res) => {
         body: JSON.stringify(req.body || {})
       });
 
-      // Pass through JSON (with mode header for quick debugging)
       res.set("x-aipipe-mode", "proxy");
-      const d = await r.json();
-      if (!r.ok) return res.status(r.status).json(d);
-      return res.json(d);
+      res.set("x-aipipe-auth-mode", authMode);
+
+      // pass-through JSON/status
+      const text = await r.text();
+      // Try to parse, but still return text if not JSON
+      let payload;
+      try { payload = JSON.parse(text); } catch { payload = { raw: text }; }
+
+      return res.status(r.status).json(payload);
     }
 
     // Mock branch (no AIPIPE_URL)
     const { input = "" } = req.body || {};
-    const now = new Date().toISOString();
     res.set("x-aipipe-mode", "mock");
     return res.json({
       ok: true,
@@ -242,13 +265,14 @@ app.post("/api/aipipe", async (req, res) => {
         { name: "summarize", status: "ok" }
       ],
       summary: input ? `AI Pipe mock processed: "${input}"` : "AI Pipe mock: no input provided.",
-      timestamp: now
+      timestamp: new Date().toISOString()
     });
   } catch (err) {
     console.error("AI Pipe error:", err);
-    res.status(500).json({ error: { message: err.message || "AI Pipe failed" } });
+    res.status(500).json({ ok:false, error: err.message || "AI Pipe failed" });
   }
 });
+
 
 /* =========================
    Static frontend
