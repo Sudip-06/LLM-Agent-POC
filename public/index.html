@@ -36,8 +36,9 @@
       <div class="col-md-3">
         <div class="label">Provider</div>
         <select id="provider" class="form-select">
-          <option value="groq" selected>Groq (gorq)</option>
           <option value="gemini">Gemini</option>
+          <option value="groq" selected>Groq (gorq)</option>
+          
         </select>
       </div>
       <div class="col-md-5">
@@ -47,11 +48,7 @@
       <div class="col-md-4">
         <div class="label">System prompt</div>
         <input id="systemPrompt" class="form-control"
-          value="You are a tool-using assistant.
-- Use `search` for fresh info from the web.
-- Use `aipipe` for workflow-style transforms.
-- Use `exec_js` for quick calculations or scripts.
-Do not print raw function calls like <function=...> or tool JSON. After each tool, summarize what you learned in plain language. Stop when the task is complete.">
+          value="">
       </div>
     </div>
 
