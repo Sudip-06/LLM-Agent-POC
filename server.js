@@ -33,15 +33,18 @@ const {
   GOOGLE_API_KEY = "",
   GOOGLE_CSE_ID = "",
 
-  // AI Pipe (optional). If empty, we return a friendly mock.
-  AIPIPE_URL = ""
+  // AI Pipe proxy
+  AIPIPE_URL = "",
+  AIPIPE_AUTH = ""   // NEW: optional Authorization header (e.g., "Bearer <token>")
 } = process.env;
 
 if (!GROQ_API_KEY) console.warn("WARNING: GROQ_API_KEY not set.");
 if (!GEMINI_API_KEY) console.warn("WARNING: GEMINI_API_KEY not set.");
 
-app.get("/api/healthz", (_req, res) => res.json({ ok: true, service: "llm-agent-dual" }));
-app.get("/api/version", (_req, res) => res.json({ version: "1.0.1" }));
+app.get("/api/healthz", (_req, res) =>
+  res.json({ ok: true, service: "llm-agent-dual" })
+);
+app.get("/api/version", (_req, res) => res.json({ version: "1.0.2" }));
 
 /* =========================
    Groq chat (OpenAI-style)
@@ -81,9 +84,6 @@ app.post("/api/groq/chat", async (req, res) => {
 /* =========================
    Gemini adapter (v1beta)
    POST /api/gemini/chat
-   - Accepts OpenAI-like { system, messages, tools }
-   - Calls Gemini generateContent
-   - Returns OpenAI-like { choices: [{ message: { content, tool_calls } }] }
 ========================= */
 app.post("/api/gemini/chat", async (req, res) => {
   try {
@@ -212,19 +212,27 @@ app.get("/api/search", async (req, res) => {
 app.post("/api/aipipe", async (req, res) => {
   try {
     if (AIPIPE_URL) {
+      const headers = { "Content-Type": "application/json" };
+      if (AIPIPE_AUTH) headers["Authorization"] = AIPIPE_AUTH;
+
       const r = await fetch(AIPIPE_URL, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify(req.body || {})
       });
+
+      // Pass through JSON (with mode header for quick debugging)
+      res.set("x-aipipe-mode", "proxy");
       const d = await r.json();
       if (!r.ok) return res.status(r.status).json(d);
       return res.json(d);
     }
-    // Mock
+
+    // Mock branch (no AIPIPE_URL)
     const { input = "" } = req.body || {};
     const now = new Date().toISOString();
-    res.json({
+    res.set("x-aipipe-mode", "mock");
+    return res.json({
       ok: true,
       engine: "mock",
       received_input: input,
