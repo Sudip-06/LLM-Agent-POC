@@ -1,18 +1,15 @@
 {
   "name": "llm-agent-dual",
   "version": "1.1.0",
-  "private": true,
   "type": "module",
+  "private": true,
   "scripts": {
-    "start": "node server.js",
-    "dev": "PORT=3000 node server.js"
-  },
-  "dependencies": {
-    "cors": "^2.8.5",
-    "express": "^4.19.2",
-    "morgan": "^1.10.0"
+    "start": "node server.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
   }
 }
