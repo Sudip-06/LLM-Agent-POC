@@ -15,7 +15,9 @@ app.use(cors());
 app.use(express.json({ limit: "4mb" }));
 app.use(morgan("tiny"));
 
-/* ===== Env ===== */
+/* =========================
+   Environment
+========================= */
 const {
   PORT = 7860,
 
@@ -23,32 +25,32 @@ const {
   GROQ_API_KEY = "",
   DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b",
 
-  // Gemini
+  // Gemini (Google Generative Language API)
   GEMINI_API_KEY = "",
   DEFAULT_GEMINI_MODEL = "gemini-2.5-flash",
 
-  // Google Programmable Search (for /api/search)
+  // Google Programmable Search for /api/search
   GOOGLE_API_KEY = "",
   GOOGLE_CSE_ID = "",
 
-  // AI Pipe (optional). If empty, server returns a helpful mock.
+  // AI Pipe (optional). If empty, we return a friendly mock.
   AIPIPE_URL = ""
 } = process.env;
 
 if (!GROQ_API_KEY) console.warn("WARNING: GROQ_API_KEY not set.");
 if (!GEMINI_API_KEY) console.warn("WARNING: GEMINI_API_KEY not set.");
 
-/* ===== Health ===== */
 app.get("/api/healthz", (_req, res) => res.json({ ok: true, service: "llm-agent-dual" }));
-app.get("/api/version", (_req, res) => res.json({ version: "1.0.0" }));
+app.get("/api/version", (_req, res) => res.json({ version: "1.0.1" }));
 
-/* =======================================================================================
-   GROQ: OpenAI-style chat proxy
-   Endpoint: https://api.groq.com/openai/v1/chat/completions
-   Body: { model, messages, tools?, tool_choice? }
-======================================================================================= */
+/* =========================
+   Groq chat (OpenAI-style)
+   POST /api/groq/chat
+========================= */
 app.post("/api/groq/chat", async (req, res) => {
   try {
+    if (!GROQ_API_KEY) return res.status(500).json({ error: "Missing GROQ_API_KEY" });
+
     const body = req.body || {};
     const model = body.model || DEFAULT_GROQ_MODEL;
     if (!Array.isArray(body.messages)) body.messages = [];
@@ -71,28 +73,27 @@ app.post("/api/groq/chat", async (req, res) => {
     if (!r.ok) return res.status(r.status).json(data);
     res.json(data);
   } catch (err) {
-    console.error(err);
+    console.error("Groq error:", err);
     res.status(500).json({ error: { message: err.message || "Groq chat proxy failed" } });
   }
 });
 
-/* =======================================================================================
-   GEMINI: Adapter that accepts OpenAI-like { system, messages, tools }
-   and calls Google Generative Language API (v1beta) generateContent.
-   Returns an OpenAI-like { choices: [{ message: { content, tool_calls } }] }.
-======================================================================================= */
+/* =========================
+   Gemini adapter (v1beta)
+   POST /api/gemini/chat
+   - Accepts OpenAI-like { system, messages, tools }
+   - Calls Gemini generateContent
+   - Returns OpenAI-like { choices: [{ message: { content, tool_calls } }] }
+========================= */
 app.post("/api/gemini/chat", async (req, res) => {
   try {
+    if (!GEMINI_API_KEY) return res.status(500).json({ error: "Missing GEMINI_API_KEY" });
+
     const { model, system, messages, tools } = req.body || {};
     const mdl = model || DEFAULT_GEMINI_MODEL;
-    if (!Array.isArray(messages)) {
-      return res.status(400).json({ error: "messages[] required" });
-    }
-    if (!GEMINI_API_KEY) {
-      return res.status(500).json({ error: "GEMINI_API_KEY not set" });
-    }
+    if (!Array.isArray(messages)) return res.status(400).json({ error: "messages[] required" });
 
-    // Convert OpenAI tools -> Gemini functionDeclarations
+    // OpenAI tools -> Gemini functionDeclarations
     let functionDeclarations;
     if (Array.isArray(tools) && tools.length) {
       functionDeclarations = tools
@@ -100,11 +101,11 @@ app.post("/api/gemini/chat", async (req, res) => {
         .map(t => ({
           name: t.function.name,
           description: t.function.description || "",
-          parameters: t.function.parameters || { type: "object" }
+          parameters: t.function.parameters || { type: "object" } // JSON schema
         }));
     }
 
-    // Convert OpenAI-style messages -> Gemini contents
+    // OpenAI messages -> Gemini contents
     const contents = [];
     let systemInstruction = system
       ? { role: "system", parts: [{ text: String(system) }] }
@@ -117,22 +118,22 @@ app.post("/api/gemini/chat", async (req, res) => {
         continue;
       }
       if (role === "tool") {
-        // Tool result: Gemini expects functionResponse
+        // Tool result => functionResponse
         let responseObj = {};
-        try { responseObj = m.content ? JSON.parse(m.content) : {}; } catch { responseObj = { raw: String(m.content || "") }; }
+        try { responseObj = m.content ? JSON.parse(m.content) : {}; }
+        catch { responseObj = { raw: String(m.content || "") }; }
         contents.push({
           role: "tool",
           parts: [{ functionResponse: { name: m.name || m.tool_name || "tool", response: responseObj } }]
         });
         continue;
       }
-      // user / assistant => user / model
+      // user / assistant
       const gemRole = role === "assistant" ? "model" : (role === "user" ? "user" : role);
       contents.push({ role: gemRole, parts: [{ text: String(m.content || "") }] });
     }
 
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(mdl)}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
-
     const body = {
       contents,
       tools: functionDeclarations && functionDeclarations.length ? [{ functionDeclarations }] : undefined,
@@ -166,16 +167,16 @@ app.post("/api/gemini/chat", async (req, res) => {
       }
     }
 
-    res.json({
-      choices: [{ message: { content: contentText || "", tool_calls } }]
-    });
+    res.json({ choices: [{ message: { content: contentText || "", tool_calls } }] });
   } catch (err) {
-    console.error(err);
+    console.error("Gemini error:", err);
     res.status(500).json({ error: { message: err.message || "Gemini adapter failed" } });
   }
 });
 
-/* ===== Google Search Snippets (Custom Search JSON API) ===== */
+/* =========================
+   Google Search (Custom Search)
+========================= */
 app.get("/api/search", async (req, res) => {
   try {
     const q = (req.query.q || "").toString().trim();
@@ -200,16 +201,17 @@ app.get("/api/search", async (req, res) => {
     }));
     res.json({ query: q, items });
   } catch (err) {
-    console.error(err);
+    console.error("Search error:", err);
     res.status(500).json({ error: { message: err.message || "Search failed" } });
   }
 });
 
-/* ===== AI Pipe: proxy or mock (auto-fallback) ===== */
+/* =========================
+   AI Pipe (proxy or mock)
+========================= */
 app.post("/api/aipipe", async (req, res) => {
   try {
     if (AIPIPE_URL) {
-      // Proxy mode
       const r = await fetch(AIPIPE_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -219,11 +221,10 @@ app.post("/api/aipipe", async (req, res) => {
       if (!r.ok) return res.status(r.status).json(d);
       return res.json(d);
     }
-
-    // Mock mode
+    // Mock
     const { input = "" } = req.body || {};
     const now = new Date().toISOString();
-    return res.json({
+    res.json({
       ok: true,
       engine: "mock",
       received_input: input,
@@ -236,17 +237,19 @@ app.post("/api/aipipe", async (req, res) => {
       timestamp: now
     });
   } catch (err) {
-    console.error(err);
+    console.error("AI Pipe error:", err);
     res.status(500).json({ error: { message: err.message || "AI Pipe failed" } });
   }
 });
 
-/* ===== Static frontend ===== */
+/* =========================
+   Static frontend
+========================= */
 app.use(express.static(path.join(__dirname, "public")));
 app.get("*", (_req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
 });
 
 app.listen(PORT, () => {
-  console.log(`LLM Agent (Groq + Gemini) on http://localhost:${PORT}`);
+  console.log(`LLM Agent (Groq + Gemini) running on http://localhost:${PORT}`);
 });
