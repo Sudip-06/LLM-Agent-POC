@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: llm-agent-groq
+    env: node
+    plan: free
+    buildCommand: "npm install"
+    startCommand: "npm start"
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: DEFAULT_MODEL
+        value: "llama-3.1-70b-versatile"
+      - key: GROQ_API_KEY
+        sync: false   # set in Render Dashboard
+      - key: GOOGLE_API_KEY
+        sync: false   # for /api/search
+      - key: GOOGLE_CSE_ID
+        sync: false   # Custom Search cx
+      - key: AIPIPE_URL
+        sync: false   # optional; leave empty to use built-in mock
