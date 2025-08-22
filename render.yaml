@@ -1,8 +1,9 @@
 services:
   - type: web
-    name: llm-agent-groq
+    name: llm-agent-dual
     env: node
     plan: free
+    region: oregon
     buildCommand: "npm install"
     startCommand: "npm start"
     envVars:
@@ -10,13 +11,19 @@ services:
         value: production
       - key: PORT
         value: 10000
-      - key: DEFAULT_MODEL
-        value: "llama-3.1-70b-versatile"
+      - key: DEFAULT_GROQ_MODEL
+        value: "openai/gpt-oss-120b"
+      - key: DEFAULT_GEMINI_MODEL
+        value: "gemini-2.5-flash"
       - key: GROQ_API_KEY
-        sync: false   # set in Render Dashboard
+        sync: false         # set in Render Dashboard
+      - key: GEMINI_API_KEY
+        sync: false         # set in Render Dashboard
       - key: GOOGLE_API_KEY
-        sync: false   # for /api/search
+        sync: false         # optional; for /api/search
       - key: GOOGLE_CSE_ID
-        sync: false   # Custom Search cx
+        sync: false         # optional; Programmable Search cx
       - key: AIPIPE_URL
-        sync: false   # optional; leave empty to use built-in mock
+        sync: false         # optional; leave empty to use mock
+    healthCheckPath: /api/healthz
+    autoDeploy: true
