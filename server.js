@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import express from "express";
 import cors from "cors";
 import morgan from "morgan";
@@ -209,69 +210,87 @@ app.get("/api/search", async (req, res) => {
 /* =========================
    AI Pipe (proxy or mock)
 ========================= */
-// server.js
+// at top with other imports
+import crypto from "node:crypto";
+
+// ...
+
 app.post("/api/aipipe", async (req, res) => {
   try {
-    if (AIPIPE_URL) {
-      // Build headers
-      const headers = { "Content-Type": "application/json" };
-
-      // 1) Preferred: from env (production)
-      let authMode = "none";
-      if (AIPIPE_AUTH && AIPIPE_AUTH.trim()) {
-        headers["Authorization"] = AIPIPE_AUTH.trim();
-        authMode = "env";
-      } else {
-        // 2) Fallbacks for dev/debug
-        const hClientAuth = req.get("authorization");
-        const hClientX    = req.get("x-aipipe-auth");
-        if (hClientAuth && hClientAuth.trim()) {
-          headers["Authorization"] = hClientAuth.trim();
-          authMode = "client-authorization";
-        } else if (hClientX && hClientX.trim()) {
-          headers["Authorization"] = hClientX.trim();
-          authMode = "client-x-aipipe-auth";
-        }
-      }
-
-      const r = await fetch(AIPIPE_URL, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(req.body || {})
+    if (!process.env.AIPIPE_URL) {
+      // ---- Mock branch (no URL set) ----
+      const { input = "" } = req.body || {};
+      res.set("x-aipipe-mode", "mock");
+      return res.json({
+        ok: true,
+        engine: "mock",
+        received_input: input,
+        steps: [
+          { name: "parse", status: "ok" },
+          { name: "analyze", status: "ok" },
+          { name: "summarize", status: "ok" }
+        ],
+        summary: input ? `AI Pipe mock processed: "${input}"` : "AI Pipe mock: no input provided.",
+        timestamp: new Date().toISOString()
       });
-
-      res.set("x-aipipe-mode", "proxy");
-      res.set("x-aipipe-auth-mode", authMode);
-
-      // pass-through JSON/status
-      const text = await r.text();
-      // Try to parse, but still return text if not JSON
-      let payload;
-      try { payload = JSON.parse(text); } catch { payload = { raw: text }; }
-
-      return res.status(r.status).json(payload);
     }
 
-    // Mock branch (no AIPIPE_URL)
-    const { input = "" } = req.body || {};
-    res.set("x-aipipe-mode", "mock");
-    return res.json({
-      ok: true,
-      engine: "mock",
-      received_input: input,
-      steps: [
-        { name: "parse", status: "ok" },
-        { name: "analyze", status: "ok" },
-        { name: "summarize", status: "ok" }
-      ],
-      summary: input ? `AI Pipe mock processed: "${input}"` : "AI Pipe mock: no input provided.",
-      timestamp: new Date().toISOString()
+    // ---- Proxy branch ----
+    const headers = { "Content-Type": "application/json" };
+
+    // Helper: sanitize tokens (trim, dequote, ensure Bearer)
+    const dequote = s => s.replace(/^"(.*)"$/, "$1").replace(/^'(.*)'$/, "$1");
+    const normalizeToken = raw => {
+      let t = (raw || "").toString().trim();
+      t = dequote(t);
+      if (!t) return "";
+      // If user pasted a bare JWT, prefix Bearer
+      if (!/^Bearer\s+/i.test(t)) t = "Bearer " + t;
+      return t;
+    };
+
+    // Prefer client override for testing, else env
+    let authMode = "none";
+    let token =
+      normalizeToken(req.get("x-aipipe-auth")) ||
+      normalizeToken(req.get("authorization")) ||
+      normalizeToken(process.env.AIPIPE_AUTH);
+
+    if (token) {
+      if (normalizeToken(req.get("x-aipipe-auth"))) authMode = "client-x-aipipe-auth";
+      else if (normalizeToken(req.get("authorization"))) authMode = "client-authorization";
+      else authMode = "env";
+      headers["Authorization"] = token;
+    }
+
+    // Call downstream AI Pipe
+    const r = await fetch(process.env.AIPIPE_URL, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(req.body || {})
     });
+
+    const text = await r.text();
+    let payload; try { payload = JSON.parse(text); } catch { payload = { raw: text }; }
+
+    // Safe debug headers (no secrets)
+    const len = (token || "").length;
+    const isBearer = (token || "").startsWith("Bearer ");
+    const hash = len ? crypto.createHash("sha256").update(token).digest("hex").slice(0, 12) : "";
+
+    res.set("x-aipipe-mode", "proxy");
+    res.set("x-aipipe-auth-mode", authMode);
+    res.set("x-aipipe-auth-len", String(len));
+    res.set("x-aipipe-auth-bearer", String(isBearer));
+    res.set("x-aipipe-auth-hash", hash);
+
+    return res.status(r.status).json(payload);
   } catch (err) {
     console.error("AI Pipe error:", err);
     res.status(500).json({ ok:false, error: err.message || "AI Pipe failed" });
   }
 });
+
 
 
 /* =========================
