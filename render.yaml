@@ -1,31 +1,30 @@
 services:
   - type: web
-    name: llm-agent-dual
+    name: llm-agent-poc
     env: node
     plan: free
     region: oregon
-    buildCommand: "npm install"
-    startCommand: "npm start"
+    runtime: node
+    buildCommand: ""
+    startCommand: "node server.js"
+    autoDeploy: true
     envVars:
-      - key: NODE_ENV
-        value: production
+      - key: NODE_VERSION
+        value: 22
       - key: PORT
         value: 10000
-      - key: DEFAULT_GROQ_MODEL
-        value: "openai/gpt-oss-120b"
-      - key: DEFAULT_GEMINI_MODEL
-        value: "gemini-2.5-flash"
+      # --- Providers ---
       - key: GROQ_API_KEY
         sync: false
       - key: GEMINI_API_KEY
         sync: false
+      # --- Google Search (CSE) ---
       - key: GOOGLE_API_KEY
         sync: false
       - key: GOOGLE_CSE_ID
         sync: false
+      # --- AI Pipe proxy (optional but recommended) ---
       - key: AIPIPE_URL
         sync: false
       - key: AIPIPE_AUTH
         sync: false
-    healthCheckPath: /api/healthz
-    autoDeploy: true
