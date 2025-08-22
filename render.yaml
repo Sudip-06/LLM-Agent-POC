@@ -16,14 +16,14 @@ services:
       - key: DEFAULT_GEMINI_MODEL
         value: "gemini-2.5-flash"
       - key: GROQ_API_KEY
-        sync: false         # set in Render Dashboard
+        sync: false
       - key: GEMINI_API_KEY
-        sync: false         # set in Render Dashboard
+        sync: false
       - key: GOOGLE_API_KEY
-        sync: false         # optional; for /api/search
+        sync: false
       - key: GOOGLE_CSE_ID
-        sync: false         # optional; Programmable Search cx
+        sync: false
       - key: AIPIPE_URL
-        sync: false         # optional; leave empty to use mock
+        sync: false
     healthCheckPath: /api/healthz
     autoDeploy: true
