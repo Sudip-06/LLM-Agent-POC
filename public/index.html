@@ -7,7 +7,7 @@
   <!-- Bootstrap -->
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <script defer src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-  <!-- Optional helper (keeps our defaults if not available) -->
+  <!-- Optional helper -->
   <script defer src="https://cdn.jsdelivr.net/gh/sanand0/bootstrap-llm-provider/dist/bootstrap-llm-provider.min.js"></script>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <style>
@@ -38,7 +38,6 @@
         <select id="provider" class="form-select">
           <option value="gemini" selected>Gemini</option>
           <option value="groq">Groq (gorq)</option>
-          
         </select>
       </div>
       <div class="col-md-5">
@@ -46,9 +45,8 @@
         <select id="modelMain" class="form-select"></select>
       </div>
       <div class="col-md-4">
-        <div class="label">Custom prompt</div>
-        <input id="systemPrompt" class="form-control"
-          value="">
+        <div class="label">System prompt</div>
+        <input id="systemPrompt" class="form-control" value="">
       </div>
     </div>
 
@@ -152,6 +150,9 @@ function populateModels() {
   fill(modelAnswer);
 }
 providerSel.addEventListener("change", populateModels);
+
+// Ensure Gemini is default on load (belt + suspenders)
+providerSel.value = "gemini";
 populateModels();
 
 /* =========================
@@ -401,7 +402,7 @@ sendBtn.addEventListener("click", () => {
 });
 userInput.addEventListener("keydown", (e) => { if (e.key === "Enter") sendBtn.click(); });
 
-/* Optional: helper population (keeps our defaults if not available) */
+/* Optional helper population */
 (async () => {
   try {
     await bootstrapLLMProvider.populate(modelMain);
