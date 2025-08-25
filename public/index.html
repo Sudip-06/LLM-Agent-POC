@@ -749,7 +749,7 @@ function renderAIPipeCard(d) {
   <div class="card border-0" style="background: linear-gradient(135deg, #f8f9ff 0%, #fff5f5 100%);">
     <div class="card-body p-3">
       <div class="d-flex justify-content-between align-items-center mb-2">
-        <strong>🔄 AI Pipe</strong>
+        <strong>📄 AI Pipe</strong>
         <span class="badge text-bg-secondary">${escapeHtml(d.engine || "n/a")}</span>
       </div>
       <div class="small text-muted mb-2">📅 ${escapeHtml(d.timestamp || "")}</div>
@@ -763,28 +763,140 @@ function renderAIPipeCard(d) {
 }
 
 /* =========================
-   Web Worker sandbox (exec_js)
+   Improved Web Worker sandbox (exec_js)
 ========================= */
-function runInWorker(code) {
+function runInWorker(code, timeout = 10000) {
   return new Promise((resolve) => {
-    const blob = new Blob([`
-      self.onmessage = (e) => {
-        try {
-          const result = (async () => { ${e.data} })();
-          Promise.resolve(result).then(
-            v => self.postMessage({ ok:true, result:String(v) }),
-            e => self.postMessage({ ok:false, error:String(e?.message||e) })
-          );
-        } catch (err) {
-          self.postMessage({ ok:false, error:String(err?.message||err) });
-        }
-      };`], { type: "application/javascript" });
-    const worker = new Worker(URL.createObjectURL(blob));
-    worker.onmessage = (e) => {
-      resolve(e.data.ok ? e.data.result : "Error: "+e.data.error);
-      worker.terminate();
+    // Add timeout handling
+    let timeoutId;
+    let worker;
+
+    const cleanup = () => {
+      if (timeoutId) clearTimeout(timeoutId);
+      if (worker) {
+        worker.terminate();
+        worker = null;
+      }
     };
-    worker.postMessage(code);
+
+    try {
+      // Enhanced worker code with better error handling and console capture
+      const workerCode = `
+        // Capture console output
+        let consoleOutput = [];
+        const originalConsole = {
+          log: console.log,
+          error: console.error,
+          warn: console.warn,
+          info: console.info
+        };
+        
+        ['log', 'error', 'warn', 'info'].forEach(method => {
+          console[method] = (...args) => {
+            consoleOutput.push(\`[\${method.toUpperCase()}] \${args.map(a => 
+              typeof a === 'object' ? JSON.stringify(a, null, 2) : String(a)
+            ).join(' ')}\`);
+            originalConsole[method](...args);
+          };
+        });
+
+        self.onmessage = async (e) => {
+          try {
+            consoleOutput = []; // Reset console output
+            
+            // Wrap the user code in an async function to handle both sync and async code
+            const wrappedCode = \`
+              (async () => {
+                \${e.data}
+              })()
+            \`;
+            
+            // Execute the code
+            const result = await eval(wrappedCode);
+            
+            // Prepare output
+            let output = '';
+            if (consoleOutput.length > 0) {
+              output += consoleOutput.join('\\n') + '\\n';
+            }
+            
+            // Add the final result if it's not undefined
+            if (result !== undefined) {
+              if (typeof result === 'object') {
+                output += 'Result: ' + JSON.stringify(result, null, 2);
+              } else {
+                output += 'Result: ' + String(result);
+              }
+            }
+            
+            self.postMessage({ 
+              ok: true, 
+              result: output || 'Code executed successfully (no output)',
+              consoleOutput: consoleOutput
+            });
+          } catch (err) {
+            let errorMsg = err.message || String(err);
+            if (err.stack) {
+              // Clean up the stack trace to remove worker internals
+              errorMsg += '\\n' + err.stack.split('\\n').slice(0, 3).join('\\n');
+            }
+            self.postMessage({ 
+              ok: false, 
+              error: errorMsg,
+              consoleOutput: consoleOutput
+            });
+          }
+        };
+        
+        // Handle unhandled errors
+        self.onerror = (event) => {
+          self.postMessage({ 
+            ok: false, 
+            error: \`Runtime error: \${event.message} at line \${event.lineno}\`,
+            consoleOutput: consoleOutput
+          });
+        };
+        
+        self.onunhandledrejection = (event) => {
+          self.postMessage({ 
+            ok: false, 
+            error: \`Unhandled promise rejection: \${event.reason}\`,
+            consoleOutput: consoleOutput
+          });
+        };
+      `;
+
+      const blob = new Blob([workerCode], { type: "application/javascript" });
+      worker = new Worker(URL.createObjectURL(blob));
+
+      // Set up timeout
+      timeoutId = setTimeout(() => {
+        cleanup();
+        resolve("Error: Code execution timed out after 10 seconds");
+      }, timeout);
+
+      worker.onmessage = (e) => {
+        cleanup();
+        const data = e.data;
+        if (data.ok) {
+          resolve(data.result);
+        } else {
+          resolve("Error: " + data.error);
+        }
+      };
+
+      worker.onerror = (error) => {
+        cleanup();
+        resolve("Worker Error: " + (error.message || "Failed to create worker"));
+      };
+
+      // Send the code to execute
+      worker.postMessage(code);
+
+    } catch (err) {
+      cleanup();
+      resolve("Setup Error: " + (err.message || String(err)));
+    }
   });
 }
 
@@ -810,6 +922,7 @@ async function tool_search(params) {
   addToolHtml(`search("${q}")`, html);
   return d;
 }
+
 async function tool_aipipe(params) {
   const r = await fetch("/api/aipipe", {
     method:"POST", headers:{ "Content-Type":"application/json" },
@@ -820,11 +933,39 @@ async function tool_aipipe(params) {
   addToolHtml("aipipe()", renderAIPipeCard(d));
   return d;
 }
+
+// Updated tool function with better error handling
 async function tool_exec_js(params) {
-  const out = await runInWorker(params?.code || "");
-  addToolHtml("exec_js()", `<pre class="mb-0 p-3 rounded" style="background: #f8f9fa; border: 1px solid #e9ecef; font-family: 'Monaco', 'Consolas', monospace;">${escapeHtml(out)}</pre>`);
-  return { output: out };
+  try {
+    const code = params?.code || "";
+    if (!code.trim()) {
+      const output = "Error: No code provided";
+      addToolHtml("exec_js()", `<pre class="mb-0 p-3 rounded" style="background: #fff5f5; border: 1px solid #fecaca; color: #dc2626; font-family: 'Monaco', 'Consolas', monospace;">${escapeHtml(output)}</pre>`);
+      return { output, error: "No code provided" };
+    }
+
+    const output = await runInWorker(code);
+    
+    // Determine styling based on whether it's an error
+    const isError = output.startsWith("Error:");
+    const bgColor = isError ? "#fff5f5" : "#f0fdf4";
+    const borderColor = isError ? "#fecaca" : "#bbf7d0";
+    const textColor = isError ? "#dc2626" : "#166534";
+    
+    addToolHtml("exec_js()", `<pre class="mb-0 p-3 rounded" style="background: ${bgColor}; border: 1px solid ${borderColor}; color: ${textColor}; font-family: 'Monaco', 'Consolas', monospace; white-space: pre-wrap; word-wrap: break-word;">${escapeHtml(output)}</pre>`);
+    
+    return { 
+      output, 
+      success: !isError,
+      error: isError ? output : null
+    };
+  } catch (err) {
+    const output = "Unexpected Error: " + (err.message || String(err));
+    addToolHtml("exec_js()", `<pre class="mb-0 p-3 rounded" style="background: #fff5f5; border: 1px solid #fecaca; color: #dc2626; font-family: 'Monaco', 'Consolas', monospace;">${escapeHtml(output)}</pre>`);
+    return { output, error: err.message };
+  }
 }
+
 const TOOL_MAP = { search: tool_search, aipipe: tool_aipipe, exec_js: tool_exec_js };
 
 /* =========================
