@@ -336,6 +336,9 @@
     .msg.tool::before {
       background: linear-gradient(135deg, #6b7280, #9ca3af);
     }
+
+    .msg .msg-label{ display:block; margin-bottom:.25rem; }
+
     
     .label { 
       font-weight: 700;
@@ -711,18 +714,27 @@ function renderMarkdown(mdText) {
 function addMsg(kind, text) {
   const el = document.createElement("div");
   el.className = "msg " + (kind === "user" ? "user" : kind === "tool" ? "tool" : "agent");
-  const icon = kind === "user" ? "👤" : kind === "tool" ? "🔧" : "🤖";
+  const icon  = kind === "user" ? "👤" : kind === "tool" ? "🔧" : "🤖";
   const label = kind === "user" ? "You" : kind === "tool" ? "Tool" : "Agent";
 
-  // Only assistant output uses Markdown; user & tool stay escaped
-  const contentHtml = (kind === "agent")
-    ? renderMarkdown(text)                      // Markdown-supported
-    : escapeHtml(text);                          // safe plain text
+  // label on its own line
+  const labelHTML = `<span class="msg-label"><strong>${icon} ${label}:</strong></span>`;
 
-  el.innerHTML = `<strong>${icon} ${label}:</strong> ${escapeHtml(text)}`;
+  // agent output supports Markdown (sanitized); others stay plain text
+  let bodyHTML;
+  if (kind === "agent" && window.marked && window.DOMPurify) {
+    const raw = marked.parse(String(text || ""), { breaks: true });
+    bodyHTML  = `<div class="msg-content">${DOMPurify.sanitize(raw)}</div>`;
+  } else {
+    // fallback / non-agent messages (no Markdown)
+    bodyHTML = `<div class="msg-content">${escapeHtml(text)}</div>`;
+  }
+
+  el.innerHTML = labelHTML + bodyHTML;
   chatWindow.appendChild(el);
   chatWindow.scrollTop = chatWindow.scrollHeight;
 }
+
 
 function addToolHtml(title, html) {
   const el = document.createElement("div");
