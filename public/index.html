@@ -1030,23 +1030,36 @@ async function runAgent(userText) {
   const plannerModel  = singleModel ? modelMain.value : modelPlanner.value;
   const answerModel   = singleModel ? modelMain.value : modelAnswer.value;
 
-  // Enhanced system prompt to prevent repeated tool calls
-  const enhancedSys = (sys || "") + "\n\nIMPORTANT: After using a tool and getting results, analyze the output and provide a final answer. Do not repeat the same tool call. If you have the information needed, stop using tools and give your response.";
+  // Enhanced system prompt for better task completion
+  const enhancedSys = (sys || "") + `
+
+You are a helpful assistant that can use tools to complete tasks. Follow these rules:
+1. After using a tool and getting results, ALWAYS analyze the results and provide a meaningful response
+2. Do not repeat the same tool call with identical parameters
+3. If you get the information needed from a tool, provide the final answer immediately
+4. For coding tasks: write the code, execute it, then explain the result clearly
+5. For search tasks: search once, then summarize the findings
+6. Always give complete, helpful answers based on the tool results
+
+CRITICAL: Never end with "I'm having trouble processing" - always analyze the tool results and give a proper response.`;
   
   if (enhancedSys.trim()) messages.push({ role:"system", content: enhancedSys.trim() });
   messages.push({ role:"user", content: userText });
   addMsg("user", userText);
 
   setThinking(true);
-  const seenToolCalls = new Set(); // de-dupe same id/name/args in a turn
-  let toolCallCount = 0; // Prevent infinite loops
-  const MAX_TOOL_CALLS = 10; // Maximum tool calls per conversation
+  const seenToolCalls = new Set();
+  let toolCallCount = 0;
+  const MAX_TOOL_CALLS = 8;
 
   try {
     let keepLooping = true;
-    let consecutiveNoOutput = 0; // Track messages with no content
+    let loopIterations = 0;
+    const MAX_ITERATIONS = 15;
     
-    while (keepLooping && toolCallCount < MAX_TOOL_CALLS) {
+    while (keepLooping && toolCallCount < MAX_TOOL_CALLS && loopIterations < MAX_ITERATIONS) {
+      loopIterations++;
+      
       const data = await callLLM(provider, plannerModel, messages, true);
       const msg  = data.choices?.[0]?.message || {};
 
@@ -1054,18 +1067,22 @@ async function runAgent(userText) {
       if (cleaned) {
         addMsg("agent", cleaned);
         messages.push({ role:"assistant", content: cleaned });
-        consecutiveNoOutput = 0;
-      } else {
-        consecutiveNoOutput++;
-        // If we get multiple messages with no content, something's wrong
-        if (consecutiveNoOutput > 2) {
-          addMsg("agent", "I seem to be having trouble processing. Let me try a different approach.");
-          break;
-        }
       }
 
       const toolCalls = msg.tool_calls || [];
       if (!toolCalls.length) {
+        // If we have no tool calls but also no content, force a response
+        if (!cleaned) {
+          const finalData = await callLLM(provider, plannerModel, [...messages, {
+            role: "system", 
+            content: "The user asked a question and you need to provide a helpful response. Based on the conversation so far, give your answer now."
+          }], false);
+          const finalMsg = finalData.choices?.[0]?.message?.content;
+          if (finalMsg) {
+            addMsg("agent", finalMsg);
+            messages.push({ role: "assistant", content: finalMsg });
+          }
+        }
         keepLooping = false;
         break;
       }
@@ -1073,12 +1090,13 @@ async function runAgent(userText) {
       let validToolCallsMade = 0;
       for (const tc of toolCalls) {
         const name = tc.function?.name;
-        const argsJson = tc.function?.arguments;
-        const sig = (tc.id || "") + "|" + name + "|" + (argsJson || "");
+        const argsJson = tc.function?.arguments || "{}";
+        const sig = name + "|" + argsJson;
         
+        // More lenient duplicate detection - allow same tool with different params
         if (seenToolCalls.has(sig)) {
           console.log(`Skipping duplicate tool call: ${name}`);
-          continue; // skip repeated calls
+          continue;
         }
         
         seenToolCalls.add(sig);
@@ -1086,49 +1104,76 @@ async function runAgent(userText) {
         validToolCallsMade++;
 
         let args = {};
-        try { args = argsJson ? JSON.parse(argsJson) : {}; } catch {}
+        try { 
+          args = argsJson ? JSON.parse(argsJson) : {}; 
+        } catch (e) {
+          console.warn("Failed to parse tool args:", argsJson);
+        }
 
         try {
           const handler = TOOL_MAP[name];
           if (!handler) throw new Error(`Unknown tool: ${name}`);
           const result = await handler(args);
-          messages.push({ role:"tool", tool_call_id: tc.id, name, content: JSON.stringify(result) });
+          messages.push({ 
+            role: "tool", 
+            tool_call_id: tc.id || `call_${Date.now()}_${Math.random()}`, 
+            name, 
+            content: JSON.stringify(result) 
+          });
         } catch (err) {
           showAlert(`Tool ${name} error: ${escapeHtml(err.message)}`, "danger");
-          messages.push({ role:"tool", tool_call_id: tc.id, name, content: JSON.stringify({ error: err.message }) });
+          messages.push({ 
+            role: "tool", 
+            tool_call_id: tc.id || `call_${Date.now()}_${Math.random()}`, 
+            name, 
+            content: JSON.stringify({ error: err.message }) 
+          });
         }
       }
 
-      // If no valid tool calls were made (all were duplicates), break the loop
+      // If no valid tool calls were made, try to get a final response
       if (validToolCallsMade === 0) {
+        const finalData = await callLLM(provider, plannerModel, [...messages, {
+          role: "system", 
+          content: "You've already used the necessary tools. Now provide your final answer based on the results you received. Do not make more tool calls."
+        }], false);
+        const finalMsg = finalData.choices?.[0]?.message?.content;
+        if (finalMsg) {
+          addMsg("agent", finalMsg);
+          messages.push({ role: "assistant", content: finalMsg });
+        }
         keepLooping = false;
       }
+    }
 
-      // Add a follow-up instruction after tool calls to encourage final response
-      if (keepLooping && toolCallCount > 1) {
-        messages.push({ 
+    // Always try to get a final response if we haven't provided a good answer
+    const lastMessage = messages[messages.length - 1];
+    const needsFinalResponse = !lastMessage || 
+                              lastMessage.role !== "assistant" || 
+                              !lastMessage.content ||
+                              lastMessage.content.includes("having trouble") ||
+                              lastMessage.content.length < 10;
+
+    if (needsFinalResponse) {
+      try {
+        const finalData = await callLLM(provider, answerModel || plannerModel, [...messages, {
           role: "system", 
-          content: "You have used tools and received results. Now provide a comprehensive final answer based on the information gathered. Do not make more tool calls unless absolutely necessary for a different task." 
-        });
+          content: "Based on all the tool results and conversation above, provide a complete and helpful final answer to the user's original question. Be specific and clear."
+        }], false);
+        const finalMsg = finalData.choices?.[0]?.message?.content;
+        if (finalMsg && finalMsg.trim()) {
+          addMsg("agent", finalMsg);
+          messages.push({ role: "assistant", content: finalMsg });
+        }
+      } catch (finalErr) {
+        console.error("Failed to generate final response:", finalErr);
+        addMsg("agent", "I apologize, but I encountered an issue providing a final response. Please try rephrasing your question.");
       }
     }
 
-    // If we hit the tool call limit, add a message
-    if (toolCallCount >= MAX_TOOL_CALLS) {
-      addMsg("agent", "I've reached the maximum number of tool calls. Let me provide a final response based on what I've gathered.");
-    }
-
-    // Optional second pass for final, polished answer (no tools)
-    if (!singleModel) {
-      const data2 = await callLLM(provider, answerModel, messages, false);
-      const msg2  = data2.choices?.[0]?.message;
-      if (msg2?.content) {
-        addMsg("agent", msg2.content);
-        messages.push({ role:"assistant", content: msg2.content });
-      }
-    }
   } catch (err) {
     showAlert(`Agent error: ${escapeHtml(err.message)}`, "danger");
+    addMsg("agent", `I encountered an error: ${err.message}. Please try your request again.`);
   } finally {
     setThinking(false);
   }
