@@ -719,7 +719,7 @@ function addMsg(kind, text) {
     ? renderMarkdown(text)                      // Markdown-supported
     : escapeHtml(text);                          // safe plain text
 
-  el.innerHTML = `<strong>${icon} ${label}:</strong><div class="mt-1">${contentHtml}</div>`;
+  el.innerHTML = `<strong>${icon} ${label}:</strong> ${escapeHtml(text)}`;
   chatWindow.appendChild(el);
   chatWindow.scrollTop = chatWindow.scrollHeight;
 }
