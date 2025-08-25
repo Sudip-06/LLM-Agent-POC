@@ -304,3 +304,16 @@ app.get("*", (_req, res) => {
 app.listen(PORT, () => {
   console.log(`LLM Agent (Groq + Gemini) running on http://localhost:${PORT}`);
 });
+
+
+  // === Trigger AI Pipe wakeup on startup ===
+  if (AIPIPE_URL) {
+    fetch(AIPIPE_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ input: "wakeup trigger" })
+    })
+    .then(res => console.log("Woke AI Pipe:", res.status))
+    .catch(err => console.error("Failed to wake AI Pipe:", err));
+  }
+});
