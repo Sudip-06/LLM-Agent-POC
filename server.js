@@ -301,19 +301,29 @@ app.get("*", (_req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
 });
 
-app.listen(PORT, () => {
-  console.log(`LLM Agent (Groq + Gemini) running on http://localhost:${PORT}`);
+/* =========================
+   Start a real HTTP listener only when this file is run directly
+   (e.g. `node server.js` for local dev, or on Render).
+   On Vercel, api/index.js imports the `app` export below instead,
+   and Vercel's runtime invokes it per-request without app.listen().
+========================= */
+const isMainModule = process.argv[1] && import.meta.url === `file://${process.argv[1]}`;
 
+if (isMainModule) {
+  app.listen(PORT, () => {
+    console.log(`LLM Agent (Groq + Gemini) running on http://localhost:${PORT}`);
 
+    // === Trigger AI Pipe wakeup on startup ===
+    if (AIPIPE_URL) {
+      fetch(AIPIPE_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ input: "wakeup trigger" })
+      })
+      .then(res => console.log("Woke AI Pipe:", res.status))
+      .catch(err => console.error("Failed to wake AI Pipe:", err));
+    }
+  });
+}
 
-  // === Trigger AI Pipe wakeup on startup ===
-  if (AIPIPE_URL) {
-    fetch(AIPIPE_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ input: "wakeup trigger" })
-    })
-    .then(res => console.log("Woke AI Pipe:", res.status))
-    .catch(err => console.error("Failed to wake AI Pipe:", err));
-  }
-});
+export default app;
